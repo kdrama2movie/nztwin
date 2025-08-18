@@ -1,0 +1,223 @@
+name: Setup ngrok and Remote Desktop with Cache
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  setup-ngrok:
+    runs-on: windows-latest
+    timeout-minutes: 360  # Max allowed: 6 hours
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $key = "windows-data-$date-${{ github.run_number }}"
+          echo "cache-key=$key" >> $env:GITHUB_OUTPUT
+          echo "restore-key=windows-data-$date" >> $env:GITHUB_OUTPUT
+
+      - name: Restore cached data
+        uses: actions/cache/restore@v3
+        id: cache-restore
+        with:
+          path: |
+            C:\Users\runneradmin\AppData
+            C:\Users\runneradmin\Documents
+            C:\Users\runneradmin\Desktop
+            C:\Users\runneradmin\Downloads
+            C:\ProgramData
+            C:\Program Files\*
+            C:\Program Files (x86)\*
+            C:\Windows\Temp\cache
+          key: ${{ steps.cache-key.outputs.cache-key }}
+          restore-keys: |
+            ${{ steps.cache-key.outputs.restore-key }}
+            windows-data-
+
+      - name: Create cache directories
+        run: |
+          New-Item -Path "C:\Windows\Temp\cache" -ItemType Directory -Force
+          New-Item -Path "C:\Users\runneradmin\AppData\Local\Temp" -ItemType Directory -Force
+
+      - name: Download ngrok (with retry)
+        run: |
+          $retry = 3
+          while ($retry -gt 0) {
+            try {
+              Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip -UseBasicParsing
+              if (Test-Path ngrok.zip) { break }
+            } catch {
+              Write-Host "Retrying download... ($retry left)"
+            }
+            Start-Sleep -Seconds 5
+            $retry--
+          }
+          if (!(Test-Path ngrok.zip)) { throw "❌ Failed to download ngrok after retries." }
+
+      - name: Extract ngrok
+        run: |
+          Expand-Archive ngrok.zip -DestinationPath .
+          if (!(Test-Path .\ngrok.exe)) { throw "❌ Failed to extract ngrok." }
+
+      - name: Update ngrok
+        run: .\ngrok.exe update
+
+      - name: Authenticate ngrok
+        run: .\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+
+      - name: Enable Remote Desktop
+        run: |
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1
+
+      - name: Set Password for runneradmin
+        run: |
+          $user = Get-LocalUser -Name "runneradmin"
+          if ($user.Enabled -eq $false) { Enable-LocalUser -Name "runneradmin" }
+          $secPass = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $secPass
+
+      - name: Install common applications (if not cached)
+        run: |
+          # Install Chocolatey if not present
+          if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+          
+          # Install common apps (will skip if already installed)
+          choco install -y googlechrome firefox vscode notepadplusplus 7zip
+          
+          # Create desktop shortcuts
+          $WshShell = New-Object -comObject WScript.Shell
+          $Shortcut = $WshShell.CreateShortcut("C:\Users\runneradmin\Desktop\Chrome.lnk")
+          $Shortcut.TargetPath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          $Shortcut.Save()
+
+      - name: Setup browser profiles and cache
+        run: |
+          # Chrome profile setup
+          $chromeProfile = "C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default"
+          if (!(Test-Path $chromeProfile)) {
+            New-Item -Path $chromeProfile -ItemType Directory -Force
+            # Create basic preferences
+            $prefs = @{
+              "profile" = @{
+                "name" = "Runner"
+                "default_content_setting_values" = @{
+                  "notifications" = 2
+                }
+              }
+            } | ConvertTo-Json -Depth 10
+            $prefs | Out-File -FilePath "$chromeProfile\Preferences" -Encoding UTF8
+          }
+          
+          # Firefox profile setup
+          $firefoxProfile = "C:\Users\runneradmin\AppData\Roaming\Mozilla\Firefox\Profiles"
+          if (!(Test-Path $firefoxProfile)) {
+            New-Item -Path $firefoxProfile -ItemType Directory -Force
+          }
+
+      - name: Start ngrok TCP tunnel (RDP port)
+        run: |
+          Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+          Get-Content ngrok.log -ErrorAction SilentlyContinue
+
+      - name: Display connection info
+        run: |
+          $apiUrl = "http://127.0.0.1:4040/api/tunnels"
+          try {
+            $response = Invoke-RestMethod -Uri $apiUrl
+            $tcpAddr = ($response.tunnels | Where-Object { $_.proto -eq "tcp" }).public_url
+            if ($tcpAddr) {
+              Write-Output "✅ Connect using: $tcpAddr"
+              Write-Output "Username: runneradmin"
+              Write-Output "Password: P@ssw0rd!"
+            } else {
+              Write-Output "⚠️ Unable to fetch tunnel info yet."
+            }
+          } catch {
+            Write-Output "⚠️ Ngrok API not responding."
+          }
+
+      - name: Save cache periodically
+        run: |
+          # Function to save cache
+          function Save-Cache {
+            Write-Host "💾 Saving cache snapshot..."
+            # Copy important data to cache directory
+            $cacheDir = "C:\Windows\Temp\cache"
+            
+            # Copy browser data
+            if (Test-Path "C:\Users\runneradmin\AppData\Local\Google") {
+              robocopy "C:\Users\runneradmin\AppData\Local\Google" "$cacheDir\Google" /E /XJ /R:1 /W:1 /MT:8 2>$null
+            }
+            
+            if (Test-Path "C:\Users\runneradmin\AppData\Roaming\Mozilla") {
+              robocopy "C:\Users\runneradmin\AppData\Roaming\Mozilla" "$cacheDir\Mozilla" /E /XJ /R:1 /W:1 /MT:8 2>$null
+            }
+            
+            # Copy VS Code settings
+            if (Test-Path "C:\Users\runneradmin\AppData\Roaming\Code") {
+              robocopy "C:\Users\runneradmin\AppData\Roaming\Code" "$cacheDir\Code" /E /XJ /R:1 /W:1 /MT:8 2>$null
+            }
+            
+            Write-Host "✅ Cache saved"
+          }
+          
+          # Save cache every 30 minutes and keep alive
+          for ($i = 0; $i -lt 72; $i++) {
+            Write-Host "⏳ Still alive... Iteration: $($i + 1)/72 ($(($i * 5)) minutes elapsed)"
+            
+            # Save cache every 6 iterations (30 minutes)
+            if ($i -gt 0 -and $i % 6 -eq 0) {
+              Save-Cache
+            }
+            
+            Start-Sleep -Seconds 300  # 5 minutes
+          }
+          
+          # Final cache save
+          Save-Cache
+        continue-on-error: true
+
+      - name: Save final cache
+        uses: actions/cache/save@v3
+        if: always()
+        with:
+          path: |
+            C:\Users\runneradmin\AppData
+            C:\Users\runneradmin\Documents
+            C:\Users\runneradmin\Desktop
+            C:\Users\runneradmin\Downloads
+            C:\ProgramData
+            C:\Program Files\*
+            C:\Program Files (x86)\*
+            C:\Windows\Temp\cache
+          key: ${{ steps.cache-key.outputs.cache-key }}
+
+      - name: Cache cleanup and optimization
+        if: always()
+        run: |
+          # Clean up temporary files to reduce cache size
+          Write-Host "🧹 Cleaning up temporary files..."
+          
+          # Clear Windows temp files
+          Get-ChildItem -Path "C:\Windows\Temp" -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          Get-ChildItem -Path "C:\Users\runneradmin\AppData\Local\Temp" -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          
+          # Clear browser temp data (keeping profiles)
+          Get-ChildItem -Path "C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default" -Name "Cache*" -ErrorAction SilentlyContinue | ForEach-Object { 
+            Remove-Item "C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default\$_" -Recurse -Force -ErrorAction SilentlyContinue 
+          }
+          
+          Write-Host "✅ Cleanup completed"
