@@ -16,16 +16,20 @@ jobs:
         id: cache-key
         run: |
           $date = Get-Date -Format "yyyy-MM-dd"
-          $key = "windows-portablecache-$date"
+          $key = "windows-portablecache-$date-${{ github.run_number }}"
           echo "cache-key=$key" >> $env:GITHUB_OUTPUT
           echo "restore-key=windows-portablecache-$date" >> $env:GITHUB_OUTPUT
 
       - name: Restore cached data
         uses: actions/cache/restore@v3
+        id: cache-restore
         with:
           path: |
             C:\Windows\Temp\apps-cache
             C:\Windows\Temp\cache
+            C:\Users\runneradmin\AppData\Local\Google
+            C:\Users\runneradmin\AppData\Roaming\Mozilla
+            C:\Users\runneradmin\AppData\Roaming\Code
             C:\Users\runneradmin\Documents
             C:\Users\runneradmin\Desktop
             C:\Users\runneradmin\Downloads
@@ -47,16 +51,14 @@ jobs:
             iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           }
 
-      - name: Install portable apps (fast)
+      - name: Install portable apps (fast & cached)
         run: |
           $apps = @{
-            "VSCode" = "https://update.code.visualstudio.com/latest/win32-x64-zip/stable"
-            "Chrome" = "https://dl.google.com/chrome/install/375.126/chrome-win.zip"
-            "Firefox" = "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US"
-            "NotepadPP" = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.portable.zip"
-            "7zip" = "https://www.7-zip.org/a/7za920.zip"
+            "VSCode"     = "https://update.code.visualstudio.com/latest/win32-x64-zip/stable"
+            "Firefox"    = "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US"
+            "NotepadPP"  = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.portable.zip"
+            "7zip"       = "https://www.7-zip.org/a/7za920.zip"
           }
-
           $cacheRoot = "C:\Windows\Temp\apps-cache"
 
           foreach ($app in $apps.Keys) {
@@ -68,7 +70,7 @@ jobs:
                   $zipPath = Join-Path $cacheRoot "$app.zip"
 
                   if (!(Test-Path $zipPath)) {
-                      Invoke-WebRequest $apps[$app] -OutFile $zipPath
+                      Invoke-WebRequest $apps[$app] -OutFile $zipPath -MaximumRedirection 5
                   }
 
                   Expand-Archive -Path $zipPath -DestinationPath $appFolder -Force
@@ -78,10 +80,6 @@ jobs:
                   Write-Host "✅ $app already installed, using cache"
               }
           }
-
-      - name: Add portable apps to PATH
-        run: |
-          $env:Path += ";C:\Windows\Temp\apps-cache\VSCode;C:\Windows\Temp\apps-cache\Chrome;C:\Windows\Temp\apps-cache\Firefox;C:\Windows\Temp\apps-cache\NotepadPP;C:\Windows\Temp\apps-cache\7zip"
 
       - name: Setup browser profiles
         run: |
@@ -108,62 +106,26 @@ jobs:
       - name: Start ngrok TCP tunnel
         run: Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
 
-      - name: Keep runner alive 6h + periodic cache + ngrok URL
+      - name: Keep runner alive 6 hours + periodic cache
         run: |
-          function Save-All-AppData {
-              Write-Host "💾 Saving AppData..."
-              $cacheRoot = "C:\Windows\Temp\cache\AppData"
-              $localDest = Join-Path $cacheRoot "Local"
-              $roamingDest = Join-Path $cacheRoot "Roaming"
-
-              # Local AppData
-              $localSource = "$env:USERPROFILE\AppData\Local"
-              New-Item -Path $localDest -ItemType Directory -Force
-              Get-ChildItem $localSource -Directory | ForEach-Object {
-                  $name = $_.Name
-                  if ($name -in @("Microsoft","Temp","Packages","ConnectedDevicesPlatform")) { return }
-                  robocopy $_.FullName (Join-Path $localDest $name) /E /XJ /R:1 /W:1 /MT:8 | Out-Null
-              }
-
-              # Roaming AppData
-              $roamingSource = "$env:USERPROFILE\AppData\Roaming"
-              New-Item -Path $roamingDest -ItemType Directory -Force
-              Get-ChildItem $roamingSource -Directory | ForEach-Object {
-                  $name = $_.Name
-                  if ($name -in @("Microsoft","npm")) { return }
-                  robocopy $_.FullName (Join-Path $roamingDest $name) /E /XJ /R:1 /W:1 /MT:8 | Out-Null
-              }
-          }
-
           function Save-Cache {
-              Write-Host "💾 Saving full cache..."
-              $folders = @(
-                  "C:\Users\runneradmin\Documents",
-                  "C:\Users\runneradmin\Desktop",
-                  "C:\Users\runneradmin\Downloads",
-                  "C:\Windows\Temp\apps-cache"
-              )
+              Write-Host "💾 Saving cache snapshot..."
               $cacheDir = "C:\Windows\Temp\cache"
-              foreach ($f in $folders) {
-                  if (Test-Path $f) {
-                      robocopy $f "$cacheDir\$(Split-Path $f -Leaf)" /E /XJ /R:1 /W:1 /MT:8 | Out-Null
-                  }
+              if (Test-Path "C:\Users\runneradmin\AppData\Local\Google") {
+                  robocopy "C:\Users\runneradmin\AppData\Local\Google" "$cacheDir\Google" /E /XJ /R:1 /W:1 /MT:8
               }
-              Save-All-AppData
-              Write-Host "✅ Full cache saved"
+              if (Test-Path "C:\Users\runneradmin\AppData\Roaming\Mozilla") {
+                  robocopy "C:\Users\runneradmin\AppData\Roaming\Mozilla" "$cacheDir\Mozilla" /E /XJ /R:1 /W:1 /MT:8
+              }
+              if (Test-Path "C:\Users\runneradmin\AppData\Roaming\Code") {
+                  robocopy "C:\Users\runneradmin\AppData\Roaming\Code" "$cacheDir\Code" /E /XJ /R:1 /W:1 /MT:8
+              }
+              Write-Host "✅ Cache saved"
           }
 
           for ($i = 0; $i -lt 72; $i++) {
               Write-Host "⏳ Runner alive: iteration $($i+1)/72 ($(($i*5)) minutes elapsed)"
-
               if ($i % 6 -eq 0) { Save-Cache }
-
-              try {
-                  $resp = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels
-                  $tcpAddr = ($resp.tunnels | Where-Object { $_.proto -eq "tcp" }).public_url
-                  if ($tcpAddr) { Write-Host "🌐 Ngrok RDP URL: $tcpAddr (user: runneradmin / pass: P@ssw0rd!)" }
-              } catch { Write-Host "⚠️ Ngrok API not responding yet..." }
-
               Start-Sleep -Seconds 300
           }
 
@@ -176,6 +138,9 @@ jobs:
           path: |
             C:\Windows\Temp\apps-cache
             C:\Windows\Temp\cache
+            C:\Users\runneradmin\AppData\Local\Google
+            C:\Users\runneradmin\AppData\Roaming\Mozilla
+            C:\Users\runneradmin\AppData\Roaming\Code
             C:\Users\runneradmin\Documents
             C:\Users\runneradmin\Desktop
             C:\Users\runneradmin\Downloads
