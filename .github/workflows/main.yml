@@ -1,12 +1,12 @@
-name: Setup ngrok and Remote Desktop with Persistent Apps
+name: Setup ngrok + RDP + Persistent Apps
 
 on:
   workflow_dispatch:
 
 jobs:
-  setup-ngrok:
+  setup-runner:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 360  # 6 hours max
 
     steps:
       - name: Checkout repository
@@ -27,7 +27,6 @@ jobs:
           path: |
             C:\Windows\Temp\apps-cache
             C:\Windows\Temp\cache
-            C:\Users\runneradmin\AppData
             C:\Users\runneradmin\Documents
             C:\Users\runneradmin\Desktop
             C:\Users\runneradmin\Downloads
@@ -49,68 +48,126 @@ jobs:
             iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           }
 
-      - name: Install common applications (persist to cache dir)
+      - name: Install apps (setup + portable)
         run: |
-          # Install Chrome, Firefox, VSCode, Notepad++ into cache dir if missing
-          $apps = @("googlechrome","firefox","vscode","notepadplusplus","7zip")
-          foreach ($app in $apps) {
-            if (!(Test-Path "C:\Windows\Temp\apps-cache\$app.installed")) {
-              choco install -y $app --force --params "/D:C:\Windows\Temp\apps-cache\$app"
-              New-Item -Path "C:\Windows\Temp\apps-cache\$app.installed" -ItemType File -Force
-            } else {
-              Write-Host "✅ $app already cached, skipping install"
-            }
+          $apps = @{
+            "Chrome" = "https://dl.google.com/chrome/install/375.126/chrome_installer.exe"
+            "Firefox" = "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US"
+            "VSCode" = "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user"
+            "NotepadPP" = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.Installer.exe"
+            "7zip" = "https://www.7-zip.org/a/7z2301-x64.exe"
+          }
+
+          $cacheRoot = "C:\Windows\Temp\apps-cache"
+
+          foreach ($app in $apps.Keys) {
+              $installerUrl = $apps[$app]
+              $appFolder = Join-Path $cacheRoot $app
+              $installedFlag = Join-Path $appFolder "installed.flag"
+
+              if (!(Test-Path $installedFlag)) {
+                  New-Item -Path $appFolder -ItemType Directory -Force
+
+                  $installerPath = Join-Path $env:TEMP "$app-installer.exe"
+                  Invoke-WebRequest $installerUrl -OutFile $installerPath
+
+                  # Run installer silently to custom folder
+                  Start-Process -FilePath $installerPath -ArgumentList "/S /D=$appFolder" -Wait
+
+                  # Mark as installed
+                  New-Item -Path $installedFlag -ItemType File
+                  Write-Host "✅ $app installed and cached"
+              } else {
+                  Write-Host "✅ $app already installed, using cache"
+              }
           }
 
       - name: Add cached apps to PATH
         run: |
-          $env:Path += ";C:\Windows\Temp\apps-cache\googlechrome;C:\Windows\Temp\apps-cache\firefox;C:\Windows\Temp\apps-cache\vscode;C:\Windows\Temp\apps-cache\notepadplusplus;C:\Windows\Temp\apps-cache\7zip"
+          $env:Path += ";C:\Windows\Temp\apps-cache\Chrome;C:\Windows\Temp\apps-cache\Firefox;C:\Windows\Temp\apps-cache\VSCode;C:\Windows\Temp\apps-cache\NotepadPP;C:\Windows\Temp\apps-cache\7zip"
 
-      - name: Setup browser profiles and cache
-        run: |
-          # Chrome profile
-          $chromeProfile = "C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default"
-          if (!(Test-Path $chromeProfile)) {
-            New-Item -Path $chromeProfile -ItemType Directory -Force
-          }
-
-          # Firefox profile
-          $firefoxProfile = "C:\Users\runneradmin\AppData\Roaming\Mozilla\Firefox\Profiles"
-          if (!(Test-Path $firefoxProfile)) {
-            New-Item -Path $firefoxProfile -ItemType Directory -Force
-          }
-
-      - name: Start ngrok TCP tunnel (RDP)
+      - name: Download & Setup ngrok
         run: |
           Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
           Expand-Archive ngrok.zip -DestinationPath .
           .\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
-          Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
-      - name: Enable Remote Desktop and set password
+      - name: Enable Remote Desktop & set password
         run: |
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           $secPass = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
           Set-LocalUser -Name "runneradmin" -Password $secPass
 
-      - name: Show connection info
+      - name: Start ngrok TCP tunnel
+        run: Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
+
+      - name: Keep runner alive 6h + auto AppData cache + ngrok URL
         run: |
-          Start-Sleep -Seconds 10
-          $apiUrl = "http://127.0.0.1:4040/api/tunnels"
-          try {
-            $response = Invoke-RestMethod -Uri $apiUrl
-            $tcpAddr = ($response.tunnels | Where-Object { $_.proto -eq "tcp" }).public_url
-            if ($tcpAddr) {
-              Write-Output "✅ Connect via: $tcpAddr"
-              Write-Output "Username: runneradmin"
-              Write-Output "Password: P@ssw0rd!"
-            }
-          } catch {
-            Write-Output "⚠️ Ngrok tunnel not ready"
+          function Save-All-AppData {
+              Write-Host "💾 Saving all AppData folders..."
+              $cacheRoot = "C:\Windows\Temp\cache\AppData"
+              $localDest = Join-Path $cacheRoot "Local"
+              $roamingDest = Join-Path $cacheRoot "Roaming"
+
+              # Local AppData
+              $localSource = "$env:USERPROFILE\AppData\Local"
+              New-Item -Path $localDest -ItemType Directory -Force
+              Get-ChildItem $localSource -Directory | ForEach-Object {
+                  $name = $_.Name
+                  if ($name -in @("Microsoft","Temp","Packages","ConnectedDevicesPlatform")) { return }
+                  robocopy $_.FullName (Join-Path $localDest $name) /E /XJ /R:1 /W:1 /MT:8 | Out-Null
+              }
+
+              # Roaming AppData
+              $roamingSource = "$env:USERPROFILE\AppData\Roaming"
+              New-Item -Path $roamingDest -ItemType Directory -Force
+              Get-ChildItem $roamingSource -Directory | ForEach-Object {
+                  $name = $_.Name
+                  if ($name -in @("Microsoft","npm")) { return }
+                  robocopy $_.FullName (Join-Path $roamingDest $name) /E /XJ /R:1 /W:1 /MT:8 | Out-Null
+              }
+              Write-Host "✅ All AppData cached"
           }
+
+          function Save-Cache {
+              Write-Host "💾 Saving full cache..."
+              $folders = @(
+                  "C:\Users\runneradmin\Documents",
+                  "C:\Users\runneradmin\Desktop",
+                  "C:\Users\runneradmin\Downloads",
+                  "C:\Windows\Temp\apps-cache"
+              )
+              $cacheDir = "C:\Windows\Temp\cache"
+
+              foreach ($f in $folders) {
+                  if (Test-Path $f) {
+                      robocopy $f "$cacheDir\$(Split-Path $f -Leaf)" /E /XJ /R:1 /W:1 /MT:8 | Out-Null
+                  }
+              }
+
+              Save-All-AppData
+              Write-Host "✅ Full cache saved"
+          }
+
+          for ($i = 0; $i -lt 72; $i++) {
+              Write-Host "⏳ Runner alive: iteration $($i+1)/72 ($(($i*5)) minutes elapsed)"
+
+              if ($i % 6 -eq 0) { Save-Cache }
+
+              try {
+                  $resp = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels
+                  $tcpAddr = ($resp.tunnels | Where-Object { $_.proto -eq "tcp" }).public_url
+                  if ($tcpAddr) { Write-Host "🌐 Ngrok RDP URL: $tcpAddr (user: runneradmin / pass: P@ssw0rd!)" }
+              } catch { Write-Host "⚠️ Ngrok API not responding yet..." }
+
+              Start-Sleep -Seconds 300
+          }
+
+          # Final cache save
+          Save-Cache
 
       - name: Save final cache
         uses: actions/cache/save@v3
@@ -119,7 +176,6 @@ jobs:
           path: |
             C:\Windows\Temp\apps-cache
             C:\Windows\Temp\cache
-            C:\Users\runneradmin\AppData
             C:\Users\runneradmin\Documents
             C:\Users\runneradmin\Desktop
             C:\Users\runneradmin\Downloads
