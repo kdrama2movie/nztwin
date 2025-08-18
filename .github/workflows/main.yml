@@ -1,4 +1,4 @@
-name: Setup ngrok + RDP + Persistent Apps
+name: Setup ngrok + RDP + Persistent Portable Apps
 
 on:
   workflow_dispatch:
@@ -16,13 +16,12 @@ jobs:
         id: cache-key
         run: |
           $date = Get-Date -Format "yyyy-MM-dd"
-          $key = "windows-fullcache-$date-${{ github.run_number }}"
+          $key = "windows-portablecache-$date"
           echo "cache-key=$key" >> $env:GITHUB_OUTPUT
-          echo "restore-key=windows-fullcache-$date" >> $env:GITHUB_OUTPUT
+          echo "restore-key=windows-portablecache-$date" >> $env:GITHUB_OUTPUT
 
       - name: Restore cached data
         uses: actions/cache/restore@v3
-        id: cache-restore
         with:
           path: |
             C:\Windows\Temp\apps-cache
@@ -33,7 +32,7 @@ jobs:
           key: ${{ steps.cache-key.outputs.cache-key }}
           restore-keys: |
             ${{ steps.cache-key.outputs.restore-key }}
-            windows-fullcache-
+            windows-portablecache-
 
       - name: Prepare cache directories
         run: |
@@ -48,33 +47,31 @@ jobs:
             iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           }
 
-      - name: Install apps (setup + portable)
+      - name: Install portable apps (fast)
         run: |
           $apps = @{
-            "Chrome" = "https://dl.google.com/chrome/install/375.126/chrome_installer.exe"
+            "VSCode" = "https://update.code.visualstudio.com/latest/win32-x64-zip/stable"
+            "Chrome" = "https://dl.google.com/chrome/install/375.126/chrome-win.zip"
             "Firefox" = "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US"
-            "VSCode" = "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user"
-            "NotepadPP" = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.Installer.exe"
-            "7zip" = "https://www.7-zip.org/a/7z2301-x64.exe"
+            "NotepadPP" = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.portable.zip"
+            "7zip" = "https://www.7-zip.org/a/7z2301-x64.zip"
           }
 
           $cacheRoot = "C:\Windows\Temp\apps-cache"
 
           foreach ($app in $apps.Keys) {
-              $installerUrl = $apps[$app]
               $appFolder = Join-Path $cacheRoot $app
               $installedFlag = Join-Path $appFolder "installed.flag"
 
               if (!(Test-Path $installedFlag)) {
                   New-Item -Path $appFolder -ItemType Directory -Force
+                  $zipPath = Join-Path $cacheRoot "$app.zip"
 
-                  $installerPath = Join-Path $env:TEMP "$app-installer.exe"
-                  Invoke-WebRequest $installerUrl -OutFile $installerPath
+                  if (!(Test-Path $zipPath)) {
+                      Invoke-WebRequest $apps[$app] -OutFile $zipPath
+                  }
 
-                  # Run installer silently to custom folder
-                  Start-Process -FilePath $installerPath -ArgumentList "/S /D=$appFolder" -Wait
-
-                  # Mark as installed
+                  Expand-Archive -Path $zipPath -DestinationPath $appFolder -Force
                   New-Item -Path $installedFlag -ItemType File
                   Write-Host "✅ $app installed and cached"
               } else {
@@ -82,9 +79,16 @@ jobs:
               }
           }
 
-      - name: Add cached apps to PATH
+      - name: Add portable apps to PATH
         run: |
-          $env:Path += ";C:\Windows\Temp\apps-cache\Chrome;C:\Windows\Temp\apps-cache\Firefox;C:\Windows\Temp\apps-cache\VSCode;C:\Windows\Temp\apps-cache\NotepadPP;C:\Windows\Temp\apps-cache\7zip"
+          $env:Path += ";C:\Windows\Temp\apps-cache\VSCode;C:\Windows\Temp\apps-cache\Chrome;C:\Windows\Temp\apps-cache\Firefox;C:\Windows\Temp\apps-cache\NotepadPP;C:\Windows\Temp\apps-cache\7zip"
+
+      - name: Setup browser profiles
+        run: |
+          $chromeProfile = "C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default"
+          if (!(Test-Path $chromeProfile)) { New-Item -Path $chromeProfile -ItemType Directory -Force }
+          $firefoxProfile = "C:\Users\runneradmin\AppData\Roaming\Mozilla\Firefox\Profiles"
+          if (!(Test-Path $firefoxProfile)) { New-Item -Path $firefoxProfile -ItemType Directory -Force }
 
       - name: Download & Setup ngrok
         run: |
@@ -104,10 +108,10 @@ jobs:
       - name: Start ngrok TCP tunnel
         run: Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
 
-      - name: Keep runner alive 6h + auto AppData cache + ngrok URL
+      - name: Keep runner alive 6h + periodic cache + ngrok URL
         run: |
           function Save-All-AppData {
-              Write-Host "💾 Saving all AppData folders..."
+              Write-Host "💾 Saving AppData..."
               $cacheRoot = "C:\Windows\Temp\cache\AppData"
               $localDest = Join-Path $cacheRoot "Local"
               $roamingDest = Join-Path $cacheRoot "Roaming"
@@ -129,7 +133,6 @@ jobs:
                   if ($name -in @("Microsoft","npm")) { return }
                   robocopy $_.FullName (Join-Path $roamingDest $name) /E /XJ /R:1 /W:1 /MT:8 | Out-Null
               }
-              Write-Host "✅ All AppData cached"
           }
 
           function Save-Cache {
@@ -141,13 +144,11 @@ jobs:
                   "C:\Windows\Temp\apps-cache"
               )
               $cacheDir = "C:\Windows\Temp\cache"
-
               foreach ($f in $folders) {
                   if (Test-Path $f) {
                       robocopy $f "$cacheDir\$(Split-Path $f -Leaf)" /E /XJ /R:1 /W:1 /MT:8 | Out-Null
                   }
               }
-
               Save-All-AppData
               Write-Host "✅ Full cache saved"
           }
@@ -166,7 +167,6 @@ jobs:
               Start-Sleep -Seconds 300
           }
 
-          # Final cache save
           Save-Cache
 
       - name: Save final cache
