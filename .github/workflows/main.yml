@@ -55,7 +55,6 @@ jobs:
         run: |
           $apps = @{
             "VSCode"     = "https://update.code.visualstudio.com/latest/win32-x64-archive/stable"
-            "Firefox"    = "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US"
             "NotepadPP"  = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.portable.zip"
             "7zip"       = "https://www.7-zip.org/a/7za920.zip"
           }
