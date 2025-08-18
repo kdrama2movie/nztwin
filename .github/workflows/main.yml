@@ -54,7 +54,7 @@ jobs:
             "Chrome" = "https://dl.google.com/chrome/install/375.126/chrome-win.zip"
             "Firefox" = "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US"
             "NotepadPP" = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.portable.zip"
-            "7zip" = "https://www.7-zip.org/a/7z2301-x64.zip"
+            "7zip" = "https://www.7-zip.org/a/7za920.zip"
           }
 
           $cacheRoot = "C:\Windows\Temp\apps-cache"
