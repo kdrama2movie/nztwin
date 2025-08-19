@@ -12,9 +12,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # -----------------------------
-      # Cache restore step
-      # -----------------------------
+      # -------------------------------
+      # Restore cache from last run
+      # -------------------------------
       - name: Restore cached data
         uses: actions/cache/restore@v3
         id: cache-restore
@@ -28,21 +28,20 @@ jobs:
             C:\Users\runneradmin\Documents
             C:\Users\runneradmin\Desktop
             C:\Users\runneradmin\Downloads
-          key: windows-portablecache-${{ github.run_id }}
-          restore-keys: |
-            windows-portablecache-latest
+          key: windows-portablecache-latest
+          restore-keys: windows-portablecache-latest
 
-      # -----------------------------
-      # Prepare directories
-      # -----------------------------
+      # -------------------------------
+      # Prepare cache directories
+      # -------------------------------
       - name: Prepare cache directories
         run: |
           New-Item -Path "C:\Windows\Temp\apps-cache" -ItemType Directory -Force
           New-Item -Path "C:\Windows\Temp\cache" -ItemType Directory -Force
 
-      # -----------------------------
+      # -------------------------------
       # Install Chocolatey if missing
-      # -----------------------------
+      # -------------------------------
       - name: Install Chocolatey if missing
         run: |
           if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
@@ -51,10 +50,10 @@ jobs:
             iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           }
 
-      # -----------------------------
-      # Install portable apps
-      # -----------------------------
-      - name: Install portable apps (fast & cached)
+      # -------------------------------
+      # Install portable apps (fast & cached)
+      # -------------------------------
+      - name: Install portable apps
         run: |
           $apps = @{
             "VSCode"     = "https://update.code.visualstudio.com/latest/win32-x64-archive/stable"
@@ -83,9 +82,9 @@ jobs:
               }
           }
 
-      # -----------------------------
+      # -------------------------------
       # Setup browser profiles
-      # -----------------------------
+      # -------------------------------
       - name: Setup browser profiles
         run: |
           $chromeProfile = "C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default"
@@ -93,9 +92,9 @@ jobs:
           $firefoxProfile = "C:\Users\runneradmin\AppData\Roaming\Mozilla\Firefox\Profiles"
           if (!(Test-Path $firefoxProfile)) { New-Item -Path $firefoxProfile -ItemType Directory -Force }
 
-      # -----------------------------
+      # -------------------------------
       # Download & Setup ngrok
-      # -----------------------------
+      # -------------------------------
       - name: Download & Setup ngrok
         run: |
           Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
@@ -104,9 +103,9 @@ jobs:
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
-      # -----------------------------
+      # -------------------------------
       # Enable Remote Desktop & set password
-      # -----------------------------
+      # -------------------------------
       - name: Enable Remote Desktop & set password
         run: |
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
@@ -114,21 +113,20 @@ jobs:
           $secPass = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
           Set-LocalUser -Name "runneradmin" -Password $secPass
 
-      # -----------------------------
+      # -------------------------------
       # Start ngrok TCP tunnel
-      # -----------------------------
+      # -------------------------------
       - name: Start ngrok TCP tunnel
         run: Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
 
-      # -----------------------------
-      # Keep runner alive & periodically save local cache
-      # -----------------------------
-      - name: Keep runner alive 6 hours + periodic cache
+      # -------------------------------
+      # Keep runner alive & periodically save cache
+      # -------------------------------
+      - name: Keep runner alive + periodic cache
         run: |
           function Save-Cache {
               Write-Host "💾 Saving cache snapshot..."
               $cacheDir = "C:\Windows\Temp\cache"
-
               if (Test-Path "C:\Users\runneradmin\AppData\Local\Google") {
                   robocopy "C:\Users\runneradmin\AppData\Local\Google" "$cacheDir\Google" /E /XJ /R:1 /W:1 /MT:8 /XF Cookies* /XD "Sessions"
               }
@@ -138,12 +136,7 @@ jobs:
               if (Test-Path "C:\Users\runneradmin\AppData\Roaming\Code") {
                   robocopy "C:\Users\runneradmin\AppData\Roaming\Code" "$cacheDir\Code" /E /XJ /R:1 /W:1 /MT:8
               }
-
-              if (!(Test-Path "C:\Windows\Temp\apps-cache")) {
-                  New-Item -Path "C:\Windows\Temp\apps-cache" -ItemType Directory -Force
-              }
-
-              Write-Host "✅ Cache snapshot saved locally"
+              Write-Host "✅ Cache saved"
           }
 
           for ($i = 0; $i -lt 72; $i++) {
@@ -154,34 +147,12 @@ jobs:
 
           Save-Cache
 
-      # -----------------------------
-      # Save final cache
-      # -----------------------------
+      # -------------------------------
+      # Save final cache to "latest"
+      # -------------------------------
       - name: Save final cache
         uses: actions/cache/save@v3
         if: always()
-        with:
-          path: |
-            C:\Windows\Temp\apps-cache
-            C:\Windows\Temp\cache
-            C:\Users\runneradmin\AppData\Local\Google
-            !C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default\Network\Cookies*
-            !C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default\Safe Browsing Network\*
-            !C:\Users\runneradmin\AppData\Local\Google\Chrome\User Data\Default\Sessions\*
-            C:\Users\runneradmin\AppData\Roaming\Mozilla
-            C:\Users\runneradmin\AppData\Roaming\Code
-            C:\Users\runneradmin\Documents
-            C:\Users\runneradmin\Desktop
-            C:\Users\runneradmin\Downloads
-          key: windows-portablecache-${{ github.run_id }}
-          restore-keys: windows-portablecache-latest
-
-      # -----------------------------
-      # Update latest cache (optional)
-      # -----------------------------
-      - name: Update latest cache key
-        if: always()
-        uses: actions/cache/save@v3
         with:
           path: |
             C:\Windows\Temp\apps-cache
